@@ -1,0 +1,9 @@
+build/
+zephyr/
+.vscode/
+CMakeFiles/
+CMakeCache.txt
+*.o
+*.elf
+*.hex
+*.bin
