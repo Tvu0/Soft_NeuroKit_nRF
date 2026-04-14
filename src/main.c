@@ -7,7 +7,7 @@
 int main(void)
 {
     printk("MAIN STARTED\n");
-
+    ble_init();
     while (1) {
         k_sleep(K_SECONDS(1));
     }
