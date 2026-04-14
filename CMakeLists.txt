@@ -11,6 +11,7 @@ project(BLE_EEG)
 target_sources(app PRIVATE
   src/main.c
   src/ble.c
+  src/ads1299.c
 )
 
 # NORDIC SDK APP END
