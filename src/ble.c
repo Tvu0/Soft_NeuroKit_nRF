@@ -19,7 +19,31 @@ static bool notify_enabled;
 
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
+    BT_DATA(BT_DATA_NAME_COMPLETE,
+            CONFIG_BT_DEVICE_NAME,
+            sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
+
+/* ---------------- HELPER ---------------- */
+
+static int start_advertising(void)
+{
+    int err;
+
+    err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+    if (err == -EALREADY) {
+        printk("Advertising already running\n");
+        return 0;
+    }
+
+    if (err) {
+        printk("Advertising failed: %d\n", err);
+        return err;
+    }
+
+    printk("Advertising started\n");
+    return 0;
+}
 
 /* ---------------- BLE CALLBACKS ---------------- */
 
@@ -75,11 +99,20 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
     }
 
     notify_enabled = false;
+
+    /* Do NOT restart advertising here */
+}
+
+static void recycled(void)
+{
+    printk("Connection object recycled\n");
+    start_advertising();
 }
 
 BT_CONN_CB_DEFINE(conn_callbacks) = {
     .connected = connected,
     .disconnected = disconnected,
+    .recycled = recycled,
 };
 
 /* ---------------- PUBLIC FUNCTIONS ---------------- */
@@ -100,13 +133,11 @@ int ble_init(void)
         settings_load();
     }
 
-    err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+    err = start_advertising();
     if (err) {
-        printk("Advertising failed: %d\n", err);
         return err;
     }
 
-    printk("Advertising started\n");
     return 0;
 }
 
