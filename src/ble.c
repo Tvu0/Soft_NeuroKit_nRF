@@ -1,6 +1,7 @@
 #include "ble.h"
 
 #include <errno.h>
+
 #include <zephyr/kernel.h>
 #include <zephyr/sys/printk.h>
 #include <zephyr/sys/byteorder.h>
@@ -10,13 +11,23 @@
 #include <zephyr/bluetooth/gatt.h>
 #include <zephyr/settings/settings.h>
 
-/* ---------------- BLE STATE ---------------- */
-
+/*
+ * Current BLE connection.
+ */
 static struct bt_conn *current_conn;
 static bool notify_enabled;
 
-/* ---------------- ADVERTISING DATA ---------------- */
+/*
+ * These flags are set from the CCC callback and handled in main.c.
+ */
+static volatile bool start_req;
+static volatile bool stop_req;
 
+/*
+ * Advertising data.
+ *
+ * CONFIG_BT_DEVICE_NAME is set in prj.conf.
+ */
 static const struct bt_data ad[] = {
     BT_DATA_BYTES(BT_DATA_FLAGS, (BT_LE_AD_GENERAL | BT_LE_AD_NO_BREDR)),
     BT_DATA(BT_DATA_NAME_COMPLETE,
@@ -24,13 +35,12 @@ static const struct bt_data ad[] = {
             sizeof(CONFIG_BT_DEVICE_NAME) - 1),
 };
 
-/* ---------------- HELPER ---------------- */
-
 static int start_advertising(void)
 {
     int err;
 
     err = bt_le_adv_start(BT_LE_ADV_CONN_FAST_1, ad, ARRAY_SIZE(ad), NULL, 0);
+
     if (err == -EALREADY) {
         printk("Advertising already running\n");
         return 0;
@@ -45,15 +55,66 @@ static int start_advertising(void)
     return 0;
 }
 
-/* ---------------- BLE CALLBACKS ---------------- */
+/*
+ * Public request flag helpers.
+ */
+bool ble_start_requested(void)
+{
+    return start_req;
+}
 
+bool ble_stop_requested(void)
+{
+    return stop_req;
+}
+
+void ble_clear_start_request(void)
+{
+    start_req = false;
+}
+
+void ble_clear_stop_request(void)
+{
+    stop_req = false;
+}
+
+/*
+ * CCC callback.
+ *
+ * The mobile app controls acquisition by enabling/disabling notifications:
+ *
+ * Enable notifications  -> request ADS START
+ * Disable notifications -> request ADS STOP
+ */
 static void ccc_cfg_changed(const struct bt_gatt_attr *attr, uint16_t value)
 {
     ARG_UNUSED(attr);
-    notify_enabled = (value == BT_GATT_CCC_NOTIFY);
-    printk("Notifications %s\n", notify_enabled ? "enabled" : "disabled");
+
+    bool new_state = (value == BT_GATT_CCC_NOTIFY);
+
+    if (new_state && !notify_enabled) {
+        start_req = true;
+        printk("\nNotifications enabled -> request ADS START\n");
+    } else if (!new_state && notify_enabled) {
+        stop_req = true;
+        printk("\nNotifications disabled -> request ADS STOP\n");
+    }
+
+    notify_enabled = new_state;
 }
 
+/*
+ * Custom EEG/ECG GATT service.
+ *
+ * Characteristic payload:
+ *   8 bytes total
+ *   bytes 0..3 = CH3 value, signed int32, big-endian
+ *   bytes 4..7 = CH4 value, signed int32, big-endian
+ *
+ * For current CH3-only ECG:
+ *   CH3 = filtered CH3 microvolts
+ *   CH4 = 0
+ */
 BT_GATT_SERVICE_DEFINE(eeg_svc,
     BT_GATT_PRIMARY_SERVICE(BT_UUID_DECLARE_128(
         0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
@@ -70,12 +131,13 @@ BT_GATT_SERVICE_DEFINE(eeg_svc,
         BT_GATT_PERM_READ | BT_GATT_PERM_WRITE)
 );
 
-/* ---------------- CONNECTION CALLBACKS ---------------- */
-
+/*
+ * Connection callbacks.
+ */
 static void connected(struct bt_conn *conn, uint8_t err)
 {
     if (err) {
-        printk("Connection failed (err %u)\n", err);
+        printk("Connection failed, err=%u\n", err);
         return;
     }
 
@@ -84,6 +146,7 @@ static void connected(struct bt_conn *conn, uint8_t err)
     }
 
     current_conn = bt_conn_ref(conn);
+
     printk("Connected\n");
 }
 
@@ -91,7 +154,7 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 {
     ARG_UNUSED(conn);
 
-    printk("Disconnected (reason %u)\n", reason);
+    printk("Disconnected, reason=%u\n", reason);
 
     if (current_conn) {
         bt_conn_unref(current_conn);
@@ -100,9 +163,15 @@ static void disconnected(struct bt_conn *conn, uint8_t reason)
 
     notify_enabled = false;
 
-    /* Do NOT restart advertising here */
+    /*
+     * If the app disconnects while streaming, stop ADS acquisition.
+     */
+    stop_req = true;
 }
 
+/*
+ * After a connection object is recycled, advertising can safely restart.
+ */
 static void recycled(void)
 {
     printk("Connection object recycled\n");
@@ -114,8 +183,6 @@ BT_CONN_CB_DEFINE(conn_callbacks) = {
     .disconnected = disconnected,
     .recycled = recycled,
 };
-
-/* ---------------- PUBLIC FUNCTIONS ---------------- */
 
 int ble_init(void)
 {
@@ -133,17 +200,12 @@ int ble_init(void)
         settings_load();
     }
 
-    err = start_advertising();
-    if (err) {
-        return err;
-    }
-
-    return 0;
+    return start_advertising();
 }
 
 bool ble_is_connected(void)
 {
-    return (current_conn != NULL);
+    return current_conn != NULL;
 }
 
 bool ble_notifications_enabled(void)
@@ -159,12 +221,31 @@ int ble_send_ch34(int32_t ch3, int32_t ch4)
         return -ENOTCONN;
     }
 
-    if (!bt_gatt_is_subscribed(current_conn, &eeg_svc.attrs[2], BT_GATT_CCC_NOTIFY)) {
+    if (!notify_enabled) {
         return -EACCES;
     }
 
+    /*
+     * eeg_svc.attrs[2] is the characteristic value attribute.
+     */
+    if (!bt_gatt_is_subscribed(current_conn,
+                               &eeg_svc.attrs[2],
+                               BT_GATT_CCC_NOTIFY)) {
+        return -EACCES;
+    }
+
+    /*
+     * Send signed int32 values as big-endian.
+     *
+     * Mobile app should decode:
+     *   CH3 = signed 32-bit int from bytes 0..3
+     *   CH4 = signed 32-bit int from bytes 4..7
+     */
     sys_put_be32((uint32_t)ch3, &data[0]);
     sys_put_be32((uint32_t)ch4, &data[4]);
 
-    return bt_gatt_notify(current_conn, &eeg_svc.attrs[2], data, sizeof(data));
+    return bt_gatt_notify(current_conn,
+                          &eeg_svc.attrs[2],
+                          data,
+                          sizeof(data));
 }

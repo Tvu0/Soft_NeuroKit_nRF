@@ -3,25 +3,52 @@
 
 / {
     zephyr,user {
-        drdy-gpios = <&gpio0 7 GPIO_ACTIVE_LOW>;
-        pwdn-gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
+        /*
+         * ADS1299 control/status pins.
+         *
+         * DRDY is active-low from ADS1299.
+         * RESET is active-low.
+         * START is active-high.
+         *
+         * Current working wiring:
+         *   ADS J3-15 SPI_DRDY  -> nRF P0.07
+         *   ADS J3-8  /RESET    -> nRF P0.12
+         *   ADS J3-14 SPI_START -> nRF P0.17 or your clean START GPIO
+         *
+         * IMPORTANT:
+         * Use the nRF pin that actually gave START raw=0/1 control.
+         * If you used P0.17 successfully, keep P0.17 here.
+         */
+        drdy-gpios  = <&gpio0 7 GPIO_ACTIVE_LOW>;
+        reset-gpios = <&gpio0 12 GPIO_ACTIVE_LOW>;
+        start-gpios = <&gpio0 17 GPIO_ACTIVE_HIGH>;
     };
 };
 
 &pinctrl {
     spi1_default: spi1_default {
         group1 {
-            psels = <NRF_PSEL(SPIM_SCK, 1, 8)>,
-                    <NRF_PSEL(SPIM_MOSI, 0, 11)>,
-                    <NRF_PSEL(SPIM_MISO, 0, 8)>;
+            /*
+             * ADS1299 SPI wiring:
+             *   ADS J3-3  SPI_CLK -> nRF P1.08 SCK
+             *   ADS J3-11 SPI_IN  -> nRF P0.11 MOSI
+             *   ADS J3-13 SPI_OUT -> nRF P0.08 MISO
+             */
+            psels = <
+                NRF_PSEL(SPIM_SCK, 1, 8)
+                NRF_PSEL(SPIM_MOSI, 0, 11)
+                NRF_PSEL(SPIM_MISO, 0, 8)
+            >;
         };
     };
 
     spi1_sleep: spi1_sleep {
         group1 {
-            psels = <NRF_PSEL(SPIM_SCK, 1, 8)>,
-                    <NRF_PSEL(SPIM_MOSI, 0, 11)>,
-                    <NRF_PSEL(SPIM_MISO, 0, 8)>;
+            psels = <
+                NRF_PSEL(SPIM_SCK, 1, 8)
+                NRF_PSEL(SPIM_MOSI, 0, 11)
+                NRF_PSEL(SPIM_MISO, 0, 8)
+            >;
             low-power-enable;
         };
     };
@@ -30,8 +57,17 @@
 &spi1 {
     compatible = "nordic,nrf-spim";
     status = "okay";
+
     pinctrl-0 = <&spi1_default>;
     pinctrl-1 = <&spi1_sleep>;
     pinctrl-names = "default", "sleep";
+
+    /*
+     * IMPORTANT:
+     * On ADS1299 board, CS worked when connected to J3 pin 1.
+     * This depends on JP21 routing.
+     *
+     *   ADS J3-1 SPI_CS -> nRF P1.09
+     */
     cs-gpios = <&gpio1 9 GPIO_ACTIVE_LOW>;
 };
